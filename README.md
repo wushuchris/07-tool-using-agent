@@ -1,3 +1,14 @@
+---
+title: Tool-Using Operations Agent
+emoji: 🛠️
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+app_file: app.py
+pinned: false
+license: mit
+---
+
 # Tool-Using Operations Agent — Structured Tool Router
 
 This project demonstrates a controlled tool-using AI agent in which the language model may propose tool calls, but application code retains authority over:
