@@ -315,6 +315,8 @@ HF_TOKEN
 
 configured as a Space secret.
 
+## Live Demo
+**Live Demo:** [Hugging Face Space](https://huggingface.co/spaces/FlyingNunchucks/07-tool-using-agent)
 
 ## License
 
