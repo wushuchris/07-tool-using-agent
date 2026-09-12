@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any, Dict
 
-from src.schemas import ToolCall, ToolResult
+from src.schemas import ToolAuthorization, ToolCall, ToolResult
 from src.tool_registry import TOOL_REGISTRY, get_tool
 
 
@@ -10,12 +10,7 @@ def _validate_arguments(
     tool_name: str,
     arguments: Dict[str, Any],
 ) -> None:
-    """
-    Validate tool arguments against the registry's parameter schema.
-
-    This is intentionally lightweight and supports the schema features
-    used by the tools in this project.
-    """
+    """Validate arguments against the application-owned tool schema."""
 
     if tool_name not in TOOL_REGISTRY:
         raise ValueError(
@@ -23,7 +18,6 @@ def _validate_arguments(
         )
 
     schema = TOOL_REGISTRY[tool_name]["parameters"]
-
     properties = schema.get("properties", {})
     required = schema.get("required", [])
     allow_additional = schema.get(
@@ -92,41 +86,74 @@ def _validate_arguments(
             )
 
 
-def execute_tool(call: ToolCall) -> ToolResult:
-    """
-    Validate and execute a tool call.
-
-    All outcomes are normalized into ToolResult objects so callers do not
-    need separate handling for every underlying tool.
-    """
-
-    started_at = datetime.now(timezone.utc)
-    timer_start = perf_counter()
+def authorize_tool_call(call: ToolCall) -> ToolAuthorization:
+    """Decide whether a model-proposed tool call may execute."""
 
     try:
         _validate_arguments(
             tool_name=call.tool_name,
             arguments=call.arguments,
         )
+    except Exception as exc:
+        return ToolAuthorization(
+            call_id=call.call_id,
+            tool_name=call.tool_name,
+            status="blocked",
+            reason=f"{type(exc).__name__}: {exc}",
+        )
 
+    return ToolAuthorization(
+        call_id=call.call_id,
+        tool_name=call.tool_name,
+        status="approved",
+        reason=(
+            "Tool is registered and arguments match the approved schema."
+        ),
+    )
+
+
+def execute_authorized_tool(
+    call: ToolCall,
+    authorization: ToolAuthorization,
+) -> ToolResult:
+    """Execute only a previously authorized call and normalize its result."""
+
+    started_at = datetime.now(timezone.utc)
+    timer_start = perf_counter()
+
+    if authorization.call_id != call.call_id:
+        raise ValueError("Authorization call_id does not match tool call.")
+
+    if authorization.tool_name != call.tool_name:
+        raise ValueError("Authorization tool_name does not match tool call.")
+
+    if authorization.status == "blocked":
+        completed_at = datetime.now(timezone.utc)
+        duration_ms = (perf_counter() - timer_start) * 1000
+
+        return ToolResult(
+            call_id=call.call_id,
+            tool_name=call.tool_name,
+            status="blocked",
+            output=None,
+            error=authorization.reason,
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_ms=round(duration_ms, 3),
+        )
+
+    try:
         tool = get_tool(call.tool_name)
-
         output = tool(**call.arguments)
-
         status = "success"
         error = None
-
     except Exception as exc:
         output = None
         status = "error"
         error = f"{type(exc).__name__}: {exc}"
 
-    timer_end = perf_counter()
     completed_at = datetime.now(timezone.utc)
-
-    duration_ms = (
-        timer_end - timer_start
-    ) * 1000
+    duration_ms = (perf_counter() - timer_start) * 1000
 
     return ToolResult(
         call_id=call.call_id,
@@ -137,4 +164,14 @@ def execute_tool(call: ToolCall) -> ToolResult:
         started_at=started_at,
         completed_at=completed_at,
         duration_ms=round(duration_ms, 3),
+    )
+
+
+def execute_tool(call: ToolCall) -> ToolResult:
+    """Authorize and execute one tool call through the controlled boundary."""
+
+    authorization = authorize_tool_call(call)
+    return execute_authorized_tool(
+        call=call,
+        authorization=authorization,
     )
