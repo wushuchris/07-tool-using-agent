@@ -1,5 +1,5 @@
 ---
-title: Tool-Using Operations Agent
+title: Governed Tool-Using Agent
 emoji: 🛠️
 colorFrom: blue
 colorTo: indigo
@@ -10,314 +10,418 @@ pinned: false
 license: mit
 ---
 
-# Tool-Using Operations Agent — Structured Tool Router
+# 07. Governed Tool-Using Agent — Application-Controlled Capability Boundary
 
-This project demonstrates a controlled tool-using AI agent in which the language model may propose tool calls, but application code retains authority over:
+A business-facing demonstration of how an LLM can use approved capabilities without being given unrestricted access to code execution, databases, filesystems, or arbitrary network resources.
 
-- which tools exist
-- which arguments are permitted
-- argument validation
-- tool execution
-- failure handling
-- result normalization
-- audit logging
+**Live Demo:** https://huggingface.co/spaces/FlyingNunchucks/07-tool-using-agent
 
-The central architectural principle is:
+The core pattern is:
 
-The model proposes. The application validates and executes.
+> **The model proposes. Application code owns authorization, validation, execution, and auditability.**
 
-## Project Summary
+## Why This Project Matters
 
-This repository presents a practical example of a structured tool router for an operations-oriented agent. Rather than giving the model unrestricted access to Python, shell, SQL, filesystem, or operating-system execution, the system exposes only a small set of approved tools with explicit schemas and controlled validation.
+Tool use is often described as function calling: the model decides it needs a function, calls it, receives a result, and continues reasoning.
 
-The agent is built with Python, Pydantic, an OpenAI-compatible client for Hugging Face Inference Providers, Gradio, SQLite, and the World Bank Countries API. The application records tool execution metadata in a JSONL audit log while keeping the public interface limited to the current request's tool activity.
+That description hides the most important production question:
+
+> **How do you let an AI use business systems without giving the model unrestricted authority over those systems?**
+
+This project answers that with an explicit application-owned capability boundary. The model may decide that a tool is useful, but every requested action must pass through a controlled registry, schema validation, authorization, normalized execution, and audit logging before an approved capability can run.
+
+## Business Scenario
+
+The public demo presents a fictional operations copilot that may need three different classes of capability:
+
+- deterministic local computation;
+- controlled access to an internal inventory database;
+- controlled access to an approved external reference API.
+
+A representative request is:
+
+```text
+We may ship equipment to Japan. Find the Electronics items currently in
+inventory, calculate an accessory budget of $347 per matching item, and
+give me Japan's capital, region, and income classification.
+```
+
+The request is intentionally multi-tool. The workflow is not hardcoded: the model chooses which approved tools to request and when, while application code decides what is actually allowed to execute.
+
+## Who Controls What?
+
+| Model controls | Application code controls |
+| --- | --- |
+| Whether a tool appears necessary | Which tools exist at all |
+| Which approved tool to request | Whether arguments match the approved schema |
+| How to combine returned results | Whether execution is authorized |
+| When enough information exists to answer | Tool execution |
+| Final natural-language explanation | Failure normalization and audit logging |
+
+This separation is the central engineering lesson of Agent 7.
+
+## Approved Tool Belt
+
+### `calculator`
+
+A constrained deterministic arithmetic capability.
+
+**Allowed:** approved arithmetic expressions.  
+**Not allowed:** arbitrary Python or unrestricted `eval()`.
+
+The implementation parses expressions through Python AST and permits only approved mathematical operations.
+
+### `search_inventory`
+
+A narrow SQLite inventory query interface.
+
+**Allowed:** item/category inventory search.  
+**Not allowed:** arbitrary SQL, writes, schema changes, or database administration.
+
+The tool uses explicit parameters and parameterized SQL.
+
+### `lookup_country`
+
+A structured World Bank country-information lookup.
+
+**Allowed:** approved country lookup through the intended endpoint.  
+**Not allowed:** arbitrary URLs, open-ended browsing, or unrestricted network access.
+
+The tool includes timeouts, HTTP error handling, response-shape checks, and normalized structured output.
 
 ## Architecture
 
 ```text
-User Request
-     ↓
-LLM / Tool Selection
-     ↓
+User request
+    ↓
+LLM decides whether it needs a capability
+    ↓
 Structured ToolCall
-     ↓
-Tool Registry / Allowlist
-     ↓
-Argument Validation
-     ↓
-Controlled Executor
-     ↓
-Approved Tool
-     ↓
-Normalized ToolResult
-     ↓
-Audit Log
-     ↓
-Result Returned to LLM
-     ↓
-Final Answer
+    ↓
+Application authorization boundary
+    ├─ blocked
+    │    ↓
+    │ normalized blocked ToolResult + audit record
+    │
+    └─ approved
+         ↓
+    Controlled executor
+         ↓
+    Approved capability
+         ↓
+    Normalized ToolResult + audit record
+         ↓
+    Result returned to model
+         ↓
+Additional approved tool request or final answer
 ```
 
-The LLM never receives arbitrary Python, shell, SQL, filesystem, or operating-system execution capability. All privileged actions are mediated by the application layer before a tool is executed.
+The model never receives unrestricted shell, Python, filesystem, SQL, or arbitrary network execution.
 
-## Current Stack
+## Authorization and Failure Semantics
 
-- Python
-- Pydantic
-- OpenAI-compatible Python client
-- Hugging Face Inference Providers
-- `openai/gpt-oss-120b:cerebras`
-- Gradio
-- SQLite
-- World Bank Countries API
-- pytest
+The retrofit made an important distinction explicit: **a rejected request and a failed authorized tool are not the same event.**
 
-The Hugging Face credential is supplied through the environment variable:
+### Blocked before execution
 
-```bash
-HF_TOKEN
-```
+The application refuses the request before the underlying capability runs. Examples include:
 
-## Approved Tools
+- unregistered tool name;
+- missing required argument;
+- unexpected argument;
+- wrong argument type;
+- arguments that violate the approved schema.
 
-### calculator
+These outcomes are represented as structured `blocked` results.
 
-A constrained deterministic arithmetic tool.
+### Approved but execution failed
 
-Important security characteristics:
+The request crossed the authorization boundary successfully, but the approved capability itself encountered a runtime or dependency error. Examples include:
 
-- does not use unrestricted Python `eval()`
-- parses expressions through Python AST
-- permits only approved mathematical operations
+- division by zero;
+- external API failure;
+- other runtime exceptions inside an approved tool.
 
-### search_inventory
+These outcomes are represented as structured `error` results.
 
-A constrained SQLite inventory lookup.
+### Successful execution
 
-Important security characteristics:
+The tool was registered, its arguments passed validation, execution was authorized, and the capability returned a normalized result.
 
-- does not expose arbitrary SQL execution
-- accepts only approved search parameters
-- uses parameterized SQL
-- initializes demo inventory data when needed
+These outcomes are represented as `success`.
 
-### lookup_country
-
-Retrieves structured country information using the World Bank Countries API.
-
-Important reliability characteristics:
-
-- controlled HTTP timeout
-- HTTP error handling
-- response-shape validation
-- normalized structured result
-- no API key required for the World Bank lookup itself
-
-## Agent Execution Flow
-
-The agent runs in a tool loop. The model may propose a tool call, but the application validates the call and executes it through a controlled executor. Tool results are normalized and returned to the model in a structured form, which allows the model to decide whether additional tool calls are needed before delivering a final answer.
-
-This design keeps the model largely responsible for reasoning and planning while the application remains responsible for trust boundaries and operational control.
-
-## Multi-Tool Behavior
-
-The project supports sequential tool orchestration. A request such as:
+That three-way distinction makes the audit trail much more useful:
 
 ```text
-How many Electronics items are in inventory, and what is 347 multiplied by that number?
+blocked  = application refused authority
+error    = authority was granted, execution failed
+success  = authority was granted, execution succeeded
 ```
 
-can be handled in sequence:
+## Real Execution Observability
 
-1. the model selects `search_inventory`
-2. it receives a count of 3 Electronics records
-3. the model selects `calculator`
-4. it calculates `347 * 3`
-5. it returns `1041`
+The original version returned the final answer, raw tool calls, raw results, and audit JSON only after the run completed.
 
-This is not a hardcoded workflow. The model chooses tools based on the request and the available tool schemas, while the application enforces safety and valid execution.
+The upgraded agent adds `run_agent_iter()` so the live UI can observe the real model/application interaction as it happens.
+
+The existing `run_agent()` API remains intact and consumes the same generator path, so the demo does not use a second fake orchestration implementation.
+
+The UI can expose real events such as:
+
+```text
+Request accepted
+AI deciding
+Model requested: search_inventory
+Application approved
+Tool completed
+AI deciding
+Model requested: calculator
+Application approved
+Tool completed
+AI deciding
+Final response
+```
+
+If an invalid capability is requested, the application can instead expose:
+
+```text
+Model requested
+Application blocked
+```
+
+The generic Gradio progress indicator is hidden so the system's own authorization and execution events remain the primary run experience.
+
+## Business-First Demo Presentation
+
+The approved September 2026 presentation reframes the project from a generic function-calling demo into a **governed AI capability demo**.
+
+The live Space now includes:
+
+- a centered 1080px reading path;
+- the business problem before implementation details;
+- an approved tool belt showing both allowed and disallowed capability boundaries;
+- an explicit **Model controls / Application controls** comparison;
+- a flagship multi-tool operations request;
+- **Live Controlled Execution** driven by real `run_agent_iter()` events;
+- a business-facing result and controlled-execution summary;
+- raw structured calls, results, and current-run audit records under **Engineering Audit**;
+- dedicated **Security & Failure Semantics** and **Architecture** views.
+
+The presentation principle is:
+
+> **Business story first. Engineering evidence second. Make the trust boundary visible while the agent works.**
 
 ## Auditability
 
-Every executed tool call is recorded with structured metadata:
+Every requested tool execution is associated with a structured call ID and normalized result. Audit records capture:
 
-- a call ID is assigned
-- tool arguments are preserved
-- status is recorded as success or error
-- output or error is recorded
-- start and completion timestamps are recorded
-- execution duration is recorded
+- tool name;
+- structured arguments;
+- result status;
+- output or normalized error;
+- start and completion timestamps;
+- execution duration.
 
-Audit entries are persisted as JSONL in:
+The audit log is persisted as JSONL in:
 
 ```text
 logs/tool_audit.jsonl
 ```
 
-The public Gradio interface is privacy-conscious in a portfolio/demo sense:
+The public interface displays only audit records associated with the current run. Historical records from other visitors are not exposed through the current-run view.
 
-- the complete audit log remains server-side
-- the public UI displays only audit records associated with the current request
-- historical calls from other visitors are not exposed through the current-run audit view
+This is a privacy-conscious portfolio/demo design, not a production-certified multi-tenant security boundary.
 
-This is not presented as a multi-tenant security platform; it is a privacy-conscious demo design intended for a single local or deployed app instance.
+## Multi-Tool Behavior
 
-## Failure Handling
+A model can request several approved capabilities over multiple rounds. Tool results are returned to the model as structured messages, allowing it to determine whether another tool is required before producing a final answer.
 
-The executor normalizes tool failures into structured results instead of allowing unhandled exceptions to break the agent loop. Examples of handled failure modes include:
+The maximum number of tool rounds is bounded, preventing an uncontrolled loop from running indefinitely.
 
-- unknown or unregistered tool
-- missing required argument
-- unexpected argument
-- wrong argument type
-- division by zero
-- external API failure
+This design keeps model reasoning flexible while keeping capability authority deterministic and application-owned.
 
-This keeps the model operating on consistent result objects, even when a tool fails or the dependency is unavailable.
+## Testing
+
+Run locally with:
+
+```bash
+python -m pytest -q
+```
+
+Final approved retrofit result:
+
+```text
+23 passed in 2.92s
+```
+
+The suite covers:
+
+- calculator restrictions and deterministic arithmetic;
+- SQLite inventory search;
+- mocked external country lookup behavior;
+- approved tool execution;
+- unregistered-tool blocking;
+- missing, unexpected, and incorrectly typed argument blocking;
+- explicit authorization results;
+- separation of `blocked` from execution `error`;
+- normalized runtime failures;
+- timing metadata;
+- deterministic `run_agent_iter()` event sequencing;
+- preservation of the original `run_agent()` behavior;
+- business-first presentation framing;
+- 1080px centered layout;
+- visible intermediate model-request / application-approval / tool-completion events before the final answer.
+
+The deterministic CI suite does not require a live model-provider call.
+
+## CI/CD
+
+The project was also upgraded to the current portfolio deployment standard.
+
+```text
+push to main
+    ↓
+GitHub Actions installs dependencies
+    ↓
+pytest
+    ↓
+only if tests pass
+    ↓
+GitHub → Hugging Face sync
+    ↓
+Space rebuild
+```
+
+The previous workflow synced directly to Hugging Face without a test gate. The final version deploys only after the automated suite passes.
+
+GitHub remains the source of truth.
+
+## Security and Public-Demo Boundaries
+
+The project intentionally keeps the capability surface narrow:
+
+- explicit tool registry / allowlist;
+- schema-based arguments;
+- application-owned authorization;
+- no unrestricted `eval()`;
+- no arbitrary SQL;
+- no shell tool;
+- no filesystem tool;
+- no arbitrary-network tool;
+- bounded tool rounds;
+- normalized failures;
+- current-run audit scoping;
+- environment-based secret management;
+- runtime database and audit files excluded from source control.
+
+Runtime inference uses `HF_TOKEN` in the Hugging Face Space. Deployment uses the separate GitHub repository secret `HF_DEPLOY_TOKEN`.
+
+The public demo uses synthetic inventory data and should not be used for confidential, client, financial, personal, or proprietary information.
 
 ## Repository Structure
 
 ```text
-07-tool-using-agent/
+.
 ├── app.py
 ├── requirements.txt
 ├── .env.example
 ├── data/
-│   └── .gitkeep
 ├── logs/
-│   └── .gitkeep
 ├── src/
-│   ├── __init__.py
 │   ├── agent.py
+│   ├── audit.py
+│   ├── demo_presentation.py
+│   ├── executor.py
 │   ├── schemas.py
 │   ├── tool_registry.py
-│   ├── executor.py
-│   ├── audit.py
 │   └── tools/
-│       ├── __init__.py
 │       ├── calculator.py
 │       ├── database.py
 │       └── external_api.py
 └── tests/
-    ├── __init__.py
-    ├── test_tools.py
-    └── test_executor.py
+    ├── test_agent.py
+    ├── test_app.py
+    ├── test_executor.py
+    └── test_tools.py
 ```
 
-Runtime-generated artifacts such as `operations.db` and `tool_audit.jsonl` are not presented here as tracked repository files.
-
-## Setup
+## Local Setup
 
 ```bash
 git clone https://github.com/wushuchris/07-tool-using-agent.git
 cd 07-tool-using-agent
-
 python -m venv .venv
 source .venv/bin/activate
-
 pip install -r requirements.txt
 ```
 
-Create a local `.env` file with:
+Create a local `.env` containing your own inference credential:
 
 ```bash
 HF_TOKEN=your_huggingface_token_here
 ```
 
-You may also optionally set:
+Optionally set:
 
 ```bash
 MODEL_ID=openai/gpt-oss-120b:cerebras
 ```
 
-Notes:
-
-- `.env` is gitignored
-- the real token must never be committed
-- the token should be created with only the Hugging Face Inference Provider permissions required to run the model
-
-## Running
+Then run:
 
 ```bash
 python app.py
 ```
 
-This starts the Gradio interface for the agent.
+## Production Upgrade Path
 
-## Example Requests
+A production system could extend this primitive with:
 
-- `What is 347 multiplied by 29?`
-- `What electronics are currently in inventory?`
-- `What is the capital, region, and income level of Japan?`
-- `How many Electronics items are in inventory, and what is 347 multiplied by that number?`
+- per-tool identity and authorization policy;
+- user- or role-specific capability scopes;
+- approval workflows for high-impact tools;
+- stronger JSON Schema validation;
+- idempotency keys for side-effecting tools;
+- retry / circuit-breaker policy by tool;
+- rate limits and budgets;
+- secret brokering instead of direct credential exposure;
+- persistent centralized audit storage;
+- policy decision telemetry;
+- sandboxing for selected execution classes;
+- stronger tool-result provenance and downstream verification.
 
-## Testing
+## Reusable Agent Primitive
 
-```bash
-pytest -v
+The reusable primitive demonstrated here is an **application-owned capability boundary**:
+
+```text
+Governed tool use
+= model-selected intent
++ explicit capability registry
++ typed arguments
++ authorization
++ controlled execution
++ normalized outcomes
++ bounded loops
++ auditability
 ```
 
-The repository currently reports:
+The important idea is not that the LLM can call functions.
 
-**15 automated tests currently pass.**
-
-The test suite covers:
-
-- calculator behavior and restricted execution
-- SQLite inventory search
-- mocked World Bank response handling
-- approved tool execution
-- unregistered tool rejection
-- missing arguments
-- unexpected arguments
-- incorrect argument types
-- normalized tool failures
-- execution timing metadata
-
-The tests do not imply the live LLM provider is called as part of the unit test suite.
-
-## Security and Guardrails
-
-This project is designed around a narrow, explicit trust boundary:
-
-- tool allowlisting
-- constrained tool interfaces
-- schema-based arguments
-- rejection of unknown tools
-- no unrestricted `eval`
-- no arbitrary SQL
-- no shell execution tool
-- environment-based secret management
-- runtime database and audit logs are gitignored
-- public audit display is scoped to the current run
-
-This should be understood as a disciplined portfolio/demo design, not as a production-certified security system.
+It is that the LLM **cannot grant itself authority**.
 
 ## Design Lessons
 
-This project demonstrates several engineering lessons:
-
-1. Tool selection and tool execution should be separate concerns.
-2. The model should not directly control privileged capabilities.
-3. Tool calls should use explicit schemas.
-4. Tool failures should become structured data.
-5. External dependencies require validation and timeout/error handling.
-6. Multi-step requests may require sequential tool calls.
-7. Tool activity should be observable and auditable.
-
-## Deployment
-
-The application is designed to be deployable to Hugging Face Spaces with:
-
-```bash
-HF_TOKEN
-```
-
-configured as a Space secret.
-
-## Live Demo
-**Live Demo:** [Hugging Face Space](https://huggingface.co/spaces/FlyingNunchucks/07-tool-using-agent)
+1. Function calling is a model interface; authorization is an application responsibility.
+2. Tool selection and tool execution should remain separate concerns.
+3. A model request is not permission to execute.
+4. Blocked requests should be distinguishable from authorized execution failures.
+5. Explicit schemas and allowlists create inspectable trust boundaries.
+6. Tool failures should become normalized data rather than uncontrolled exceptions.
+7. Multi-tool reasoning can remain flexible while execution authority remains deterministic.
+8. Auditability should be tied to actual capability calls, not inferred afterward.
+9. The strongest demo makes the model/application authority boundary visible while the system is running.
 
 ## License
 
-This project is distributed under the repository's existing license terms.
+MIT License.
