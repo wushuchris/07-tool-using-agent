@@ -1,5 +1,31 @@
-from src.executor import execute_tool
+from src.executor import authorize_tool_call, execute_tool
 from src.schemas import ToolCall
+
+
+def test_authorization_approves_registered_valid_call():
+    call = ToolCall(
+        tool_name="calculator",
+        arguments={"expression": "12 * 4"},
+    )
+
+    authorization = authorize_tool_call(call)
+
+    assert authorization.status == "approved"
+    assert authorization.call_id == call.call_id
+    assert authorization.tool_name == "calculator"
+    assert "approved schema" in authorization.reason
+
+
+def test_authorization_blocks_unregistered_tool_before_execution():
+    call = ToolCall(
+        tool_name="run_shell_command",
+        arguments={"command": "whoami"},
+    )
+
+    authorization = authorize_tool_call(call)
+
+    assert authorization.status == "blocked"
+    assert "not registered" in authorization.reason
 
 
 def test_executor_runs_approved_tool():
@@ -20,7 +46,7 @@ def test_executor_runs_approved_tool():
     assert result.tool_name == "calculator"
 
 
-def test_executor_rejects_unregistered_tool():
+def test_executor_blocks_unregistered_tool():
     call = ToolCall(
         tool_name="run_shell_command",
         arguments={
@@ -30,13 +56,13 @@ def test_executor_rejects_unregistered_tool():
 
     result = execute_tool(call)
 
-    assert result.status == "error"
+    assert result.status == "blocked"
     assert result.output is None
     assert result.error is not None
     assert "not registered" in result.error
 
 
-def test_executor_rejects_missing_required_argument():
+def test_executor_blocks_missing_required_argument():
     call = ToolCall(
         tool_name="calculator",
         arguments={},
@@ -44,14 +70,14 @@ def test_executor_rejects_missing_required_argument():
 
     result = execute_tool(call)
 
-    assert result.status == "error"
+    assert result.status == "blocked"
     assert result.output is None
     assert result.error is not None
     assert "Missing required argument" in result.error
     assert "expression" in result.error
 
 
-def test_executor_rejects_unexpected_argument():
+def test_executor_blocks_unexpected_argument():
     call = ToolCall(
         tool_name="calculator",
         arguments={
@@ -62,14 +88,14 @@ def test_executor_rejects_unexpected_argument():
 
     result = execute_tool(call)
 
-    assert result.status == "error"
+    assert result.status == "blocked"
     assert result.output is None
     assert result.error is not None
     assert "Unexpected argument" in result.error
     assert "unexpected" in result.error
 
 
-def test_executor_rejects_wrong_argument_type():
+def test_executor_blocks_wrong_argument_type():
     call = ToolCall(
         tool_name="calculator",
         arguments={
@@ -79,13 +105,13 @@ def test_executor_rejects_wrong_argument_type():
 
     result = execute_tool(call)
 
-    assert result.status == "error"
+    assert result.status == "blocked"
     assert result.output is None
     assert result.error is not None
     assert "must be of type 'string'" in result.error
 
 
-def test_executor_normalizes_tool_failure():
+def test_executor_marks_authorized_tool_failure_as_execution_error():
     call = ToolCall(
         tool_name="calculator",
         arguments={
@@ -93,8 +119,10 @@ def test_executor_normalizes_tool_failure():
         },
     )
 
+    authorization = authorize_tool_call(call)
     result = execute_tool(call)
 
+    assert authorization.status == "approved"
     assert result.status == "error"
     assert result.output is None
     assert result.error is not None
