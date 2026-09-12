@@ -12,6 +12,7 @@ from src.demo_presentation import (
     HERO_HTML,
     SECURITY_MARKDOWN,
     TOOL_BELT_HTML,
+    idle_activity_html,
     render_activity,
     render_summary,
     starting_activity_html,
@@ -146,7 +147,7 @@ def stream_request(user_request: str):
 
     if not user_request or not user_request.strip():
         yield (
-            render_activity([], complete=True),
+            idle_activity_html(),
             "Please enter a request.",
             render_summary(None),
             [],
@@ -250,7 +251,7 @@ with gr.Blocks(
             variant="primary",
         )
 
-        activity_output = gr.HTML(starting_activity_html())
+        activity_output = gr.HTML(idle_activity_html())
 
         with gr.Tabs():
             with gr.Tab("Business Result"):
