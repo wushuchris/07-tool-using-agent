@@ -1,13 +1,14 @@
 import json
 import os
+from collections.abc import Iterator
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from src.audit import write_audit_record
-from src.executor import execute_tool
-from src.schemas import AgentRunResult, ToolCall
+from src.executor import authorize_tool_call, execute_authorized_tool
+from src.schemas import AgentRunEvent, AgentRunResult, ToolCall
 from src.tool_registry import get_tool_definitions
 
 
@@ -15,7 +16,6 @@ load_dotenv(dotenv_path=".env")
 
 
 HF_BASE_URL = "https://router.huggingface.co/v1"
-
 DEFAULT_MODEL = "openai/gpt-oss-120b:cerebras"
 
 SYSTEM_PROMPT = """
@@ -33,7 +33,7 @@ Rules:
 7. Use lookup_country for structured country information.
 8. You may call multiple tools when the user's request requires them.
 9. After receiving tool results, use those results to construct your answer.
-10. If a tool returns an error, do not hide the failure.
+10. If a tool is blocked or returns an error, do not hide the failure.
 11. Do not expose internal chain-of-thought. Provide concise conclusions only.
 """
 
@@ -55,17 +55,31 @@ def get_client() -> OpenAI:
     )
 
 
-def run_agent(
+def _parse_tool_arguments(raw_arguments: str) -> Dict[str, Any]:
+    """Decode model-provided tool arguments into an object for validation."""
+
+    try:
+        arguments = json.loads(raw_arguments)
+
+        if not isinstance(arguments, dict):
+            raise ValueError(
+                "Tool arguments must decode to an object."
+            )
+
+        return arguments
+
+    except (json.JSONDecodeError, ValueError):
+        return {
+            "__invalid_arguments__": raw_arguments,
+        }
+
+
+def run_agent_iter(
     user_request: str,
     model: str | None = None,
     max_tool_rounds: int = 5,
-) -> AgentRunResult:
-    """
-    Run the tool-using agent.
-
-    The model may request approved tools. Every requested tool is passed
-    through the controlled executor and written to the audit log.
-    """
+) -> Iterator[AgentRunEvent]:
+    """Run the agent while emitting real control-boundary events."""
 
     if not isinstance(user_request, str):
         raise TypeError("user_request must be a string.")
@@ -104,13 +118,27 @@ def run_agent(
     executed_calls: List[ToolCall] = []
     executed_results = []
 
-    for _ in range(max_tool_rounds):
+    yield AgentRunEvent(
+        event="run_started",
+        message=(
+            "Request accepted. The model may propose only tools exposed "
+            "through the approved registry."
+        ),
+    )
+
+    for round_index in range(1, max_tool_rounds + 1):
+        yield AgentRunEvent(
+            event="model_thinking",
+            round_index=round_index,
+            message="The model is deciding whether an approved tool is needed.",
+        )
+
         response = client.chat.completions.create(
-         model=selected_model,
-         messages=messages,
-         tools=tools,
-         tool_choice="auto",
-         reasoning_effort="low",
+            model=selected_model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            reasoning_effort="low",
         )
 
         message = response.choices[0].message
@@ -134,43 +162,91 @@ def run_agent(
                 or "The agent returned no final answer."
             )
 
-            return AgentRunResult(
+            final_result = AgentRunResult(
                 user_request=user_request,
                 final_answer=final_answer,
                 tool_calls=executed_calls,
                 tool_results=executed_results,
             )
 
+            yield AgentRunEvent(
+                event="final_answer",
+                round_index=round_index,
+                message="The model produced the final answer from the available results.",
+                final_result=final_result,
+            )
+            return
+
         for model_tool_call in message.tool_calls:
-            tool_name = model_tool_call.function.name
-
-            try:
-                arguments = json.loads(
-                    model_tool_call.function.arguments
-                )
-
-                if not isinstance(arguments, dict):
-                    raise ValueError(
-                        "Tool arguments must decode to an object."
-                    )
-
-            except (
-                json.JSONDecodeError,
-                ValueError,
-            ) as exc:
-                arguments = {
-                    "__invalid_arguments__": (
-                        model_tool_call.function.arguments
-                    )
-                }
-
             call = ToolCall(
                 call_id=model_tool_call.id,
-                tool_name=tool_name,
-                arguments=arguments,
+                tool_name=model_tool_call.function.name,
+                arguments=_parse_tool_arguments(
+                    model_tool_call.function.arguments
+                ),
             )
 
-            result = execute_tool(call)
+            yield AgentRunEvent(
+                event="tool_requested",
+                round_index=round_index,
+                message=f"The model requested the '{call.tool_name}' tool.",
+                call=call,
+            )
+
+            authorization = authorize_tool_call(call)
+
+            if authorization.status == "approved":
+                yield AgentRunEvent(
+                    event="tool_approved",
+                    round_index=round_index,
+                    message=(
+                        f"Application approved '{call.tool_name}': "
+                        f"{authorization.reason}"
+                    ),
+                    call=call,
+                    authorization=authorization,
+                )
+            else:
+                result = execute_authorized_tool(
+                    call=call,
+                    authorization=authorization,
+                )
+                write_audit_record(call=call, result=result)
+                executed_calls.append(call)
+                executed_results.append(result)
+
+                yield AgentRunEvent(
+                    event="tool_blocked",
+                    round_index=round_index,
+                    message=(
+                        f"Application blocked '{call.tool_name}' before execution: "
+                        f"{authorization.reason}"
+                    ),
+                    call=call,
+                    authorization=authorization,
+                    result=result,
+                )
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": model_tool_call.id,
+                        "content": json.dumps(
+                            {
+                                "status": result.status,
+                                "output": result.output,
+                                "error": result.error,
+                            },
+                            default=str,
+                        ),
+                    }
+                )
+                continue
+
+            result = execute_authorized_tool(
+                call=call,
+                authorization=authorization,
+            )
 
             write_audit_record(
                 call=call,
@@ -180,24 +256,46 @@ def run_agent(
             executed_calls.append(call)
             executed_results.append(result)
 
-            tool_payload = {
-                "status": result.status,
-                "output": result.output,
-                "error": result.error,
-            }
+            event_name = (
+                "tool_succeeded"
+                if result.status == "success"
+                else "tool_failed"
+            )
+
+            event_message = (
+                f"Approved tool '{call.tool_name}' executed successfully."
+                if result.status == "success"
+                else (
+                    f"Approved tool '{call.tool_name}' failed during execution: "
+                    f"{result.error}"
+                )
+            )
+
+            yield AgentRunEvent(
+                event=event_name,
+                round_index=round_index,
+                message=event_message,
+                call=call,
+                authorization=authorization,
+                result=result,
+            )
 
             messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": model_tool_call.id,
                     "content": json.dumps(
-                        tool_payload,
+                        {
+                            "status": result.status,
+                            "output": result.output,
+                            "error": result.error,
+                        },
                         default=str,
                     ),
                 }
             )
 
-    return AgentRunResult(
+    final_result = AgentRunResult(
         user_request=user_request,
         final_answer=(
             "The agent reached the maximum number "
@@ -207,3 +305,35 @@ def run_agent(
         tool_calls=executed_calls,
         tool_results=executed_results,
     )
+
+    yield AgentRunEvent(
+        event="max_rounds_reached",
+        round_index=max_tool_rounds,
+        message="The configured tool-round limit was reached.",
+        final_result=final_result,
+    )
+
+
+def run_agent(
+    user_request: str,
+    model: str | None = None,
+    max_tool_rounds: int = 5,
+) -> AgentRunResult:
+    """Run the tool-using agent and return the final structured result."""
+
+    final_result: AgentRunResult | None = None
+
+    for event in run_agent_iter(
+        user_request=user_request,
+        model=model,
+        max_tool_rounds=max_tool_rounds,
+    ):
+        if event.final_result is not None:
+            final_result = event.final_result
+
+    if final_result is None:
+        raise RuntimeError(
+            "Agent run ended without a final result."
+        )
+
+    return final_result
