@@ -6,19 +6,28 @@ from pydantic import BaseModel, Field
 
 
 class ToolCall(BaseModel):
-    """A validated request to execute one approved tool."""
+    """A structured request from the model to use one tool."""
 
     call_id: str = Field(default_factory=lambda: str(uuid4()))
     tool_name: str
     arguments: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ToolResult(BaseModel):
-    """Normalized result returned by every tool."""
+class ToolAuthorization(BaseModel):
+    """Application-owned decision about whether a tool call may execute."""
 
     call_id: str
     tool_name: str
-    status: Literal["success", "error"]
+    status: Literal["approved", "blocked"]
+    reason: str
+
+
+class ToolResult(BaseModel):
+    """Normalized result returned by the controlled execution layer."""
+
+    call_id: str
+    tool_name: str
+    status: Literal["success", "blocked", "error"]
     output: Optional[Any] = None
     error: Optional[str] = None
     started_at: datetime
@@ -27,7 +36,7 @@ class ToolResult(BaseModel):
 
 
 class AuditRecord(BaseModel):
-    """Persistent record of one tool execution."""
+    """Persistent record of one requested tool execution."""
 
     timestamp: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
@@ -43,3 +52,25 @@ class AgentRunResult(BaseModel):
     final_answer: str
     tool_calls: List[ToolCall] = Field(default_factory=list)
     tool_results: List[ToolResult] = Field(default_factory=list)
+
+
+class AgentRunEvent(BaseModel):
+    """Observable event emitted while a tool-using agent request is running."""
+
+    event: Literal[
+        "run_started",
+        "model_thinking",
+        "tool_requested",
+        "tool_approved",
+        "tool_blocked",
+        "tool_succeeded",
+        "tool_failed",
+        "final_answer",
+        "max_rounds_reached",
+    ]
+    round_index: Optional[int] = None
+    message: str
+    call: Optional[ToolCall] = None
+    authorization: Optional[ToolAuthorization] = None
+    result: Optional[ToolResult] = None
+    final_result: Optional[AgentRunResult] = None
