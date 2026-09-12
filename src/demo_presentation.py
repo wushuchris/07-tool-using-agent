@@ -78,6 +78,7 @@ APP_CSS = """
     font-weight: 700;
     letter-spacing: 0.04em;
 }
+.status-idle { background: rgba(107, 114, 128, 0.15); }
 .status-running { background: rgba(245, 158, 11, 0.16); }
 .status-complete { background: rgba(34, 197, 94, 0.16); }
 .status-stopped { background: rgba(239, 68, 68, 0.14); }
@@ -280,6 +281,22 @@ EVENT_LABELS = {
     "final_answer": "Final response",
     "max_rounds_reached": "Safety stop",
 }
+
+
+def idle_activity_html() -> str:
+    """Return the resting state shown before a user starts a request."""
+
+    return """
+    <div class="activity-panel">
+      <div class="activity-header">
+        <span class="status-badge status-idle">READY</span>
+        <strong>Live Controlled Execution</strong>
+      </div>
+      <div class="event-row">
+        Run a request to watch model proposals cross the application trust boundary.
+      </div>
+    </div>
+    """
 
 
 def starting_activity_html() -> str:
